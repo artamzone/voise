@@ -2,6 +2,7 @@ r"""Opt-in Windows integration check: synthetic Russian speech + private test wi
 Run from the project: .venv\Scripts\python.exe tests\local_smoke.py
 No speech is uploaded. The temporary SAPI WAV is deleted in all cases.
 """
+import logging
 import os
 from pathlib import Path
 import statistics
@@ -77,6 +78,7 @@ class TestClip:
 
 
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     args = parser().parse_args(["--offline"])
     recognizer = load_model(args)
     print("Model:", args.model, "device:", recognizer.model.model.device,
@@ -119,9 +121,12 @@ def main():
     recording = TestClip(audio)
     ptt = PushToTalk(recording, recognizer, ClipboardPaste(), foreground)
     hook = keyboard.hook_key("f8", lambda event: ptt.key_event(event.event_type), suppress=True)
+    observed = []
+    observer = keyboard.hook(lambda event: observed.append(event) if event.scan_code in (0x2A, 0x52) else None)
     last_text = None
     try:
         for iteration in range(2):
+            observed.clear()
             # keyboard.press marks its own events as replayed and bypasses hooks.
             scan = win32api.MapVirtualKey(win32con.VK_F8, 0)
             win32api.keybd_event(win32con.VK_F8, scan, 0, 0)
@@ -145,9 +150,15 @@ def main():
                 root.update()
                 time.sleep(0.01)
             inserted = field.get("1.0", "end-1c")
-            assert inserted and "проект" in inserted.lower(), "Unicode paste failed"
+            assert inserted == text, "Unicode paste failed or text was pasted more than once"
             assert "\n" not in inserted, "Unexpected Enter/newline"
-            print(f"F8 cycle {iteration + 1}: hook, recognition, Unicode paste, no Enter: OK")
+            assert not keyboard.is_pressed("f8"), "F8 is still held"
+            assert not any(win32api.GetAsyncKeyState(key) & 0x8000 for key in
+                           (win32con.VK_SHIFT, win32con.VK_INSERT)), "Paste keys are still held"
+            assert [(event.event_type, event.scan_code, event.is_keypad) for event in observed] == [
+                ("down", 0x2A, False), ("down", 0x52, False),
+                ("up", 0x52, False), ("up", 0x2A, False)], "Hook did not pass the expected main Insert/Shift sequence"
+            print(f"F8 cycle {iteration + 1}: SendInput, F8 hook active, single Unicode paste, keys released, no Enter: OK")
             last_text = inserted
             field.delete("1.0", "end")
         assert recording.starts == 2 and recording.stops == 2, "Auto-repeat started extra capture"
@@ -155,6 +166,7 @@ def main():
     finally:
         keyboard.release("f8")
         keyboard.unhook(hook)
+        keyboard.unhook(observer)
         ptt.close()
         root.destroy()
         if old_text is not None:
